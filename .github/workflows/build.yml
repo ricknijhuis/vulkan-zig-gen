@@ -35,6 +35,15 @@ jobs:
         wget https://raw.githubusercontent.com/KhronosGroup/Vulkan-Docs/main/xml/vk.xml
         wget https://raw.githubusercontent.com/KhronosGroup/Vulkan-Docs/main/xml/video.xml
 
+    - name: Extract Vulkan version from vk.xml
+      id: vulkan
+      run: |
+        CORE=$(grep -oP 'VK_API_VERSION_\d+_\d+' vk.xml | tail -1 | grep -oP '\d+_\d+' | tr _ .)
+        HEADER=$(grep -oP '<name>VK_HEADER_VERSION</name>\s*\K\d+' vk.xml | head -1)
+        echo "core=$CORE" >> $GITHUB_OUTPUT
+        echo "header=$HEADER" >> $GITHUB_OUTPUT
+        echo "full=${CORE}.${HEADER}" >> $GITHUB_OUTPUT
+
     - name: Test and install with latest zig & latest vk.xml
       run: zig build test install -Dregistry=$(pwd)/vk.xml
 
