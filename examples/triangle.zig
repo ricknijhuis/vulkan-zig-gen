@@ -92,39 +92,39 @@ pub fn main() !void {
     var swapchain = try Swapchain.init(&gc, allocator, extent);
     defer swapchain.deinit();
 
-    const pipeline_layout = try gc.dev.createPipelineLayout(&.{
+    const pipeline_layout = try vk.createPipelineLayout(gc.dev, &.{
         .flags = .{},
         .set_layout_count = 0,
         .p_set_layouts = undefined,
         .push_constant_range_count = 0,
         .p_push_constant_ranges = undefined,
     }, null);
-    defer gc.dev.destroyPipelineLayout(pipeline_layout, null);
+    defer vk.destroyPipelineLayout(gc.dev, pipeline_layout, null);
 
     const render_pass = try createRenderPass(&gc, swapchain);
-    defer gc.dev.destroyRenderPass(render_pass, null);
+    defer vk.destroyRenderPass(gc.dev, render_pass, null);
 
     const pipeline = try createPipeline(&gc, pipeline_layout, render_pass);
-    defer gc.dev.destroyPipeline(pipeline, null);
+    defer vk.destroyPipeline(gc.dev, pipeline, null);
 
     var framebuffers = try createFramebuffers(&gc, allocator, render_pass, swapchain);
     defer destroyFramebuffers(&gc, allocator, framebuffers);
 
-    const pool = try gc.dev.createCommandPool(&.{
+    const pool = try vk.createCommandPool(gc.dev, &.{
         .queue_family_index = gc.graphics_queue.family,
     }, null);
-    defer gc.dev.destroyCommandPool(pool, null);
+    defer vk.destroyCommandPool(gc.dev, pool, null);
 
-    const buffer = try gc.dev.createBuffer(&.{
+    const buffer = try vk.createBuffer(gc.dev, &.{
         .size = @sizeOf(@TypeOf(vertices)),
         .usage = .{ .transfer_dst_bit = true, .vertex_buffer_bit = true },
         .sharing_mode = .exclusive,
     }, null);
-    defer gc.dev.destroyBuffer(buffer, null);
-    const mem_reqs = gc.dev.getBufferMemoryRequirements(buffer);
+    defer vk.destroyBuffer(gc.dev, buffer, null);
+    const mem_reqs = vk.getBufferMemoryRequirements(gc.dev, buffer);
     const memory = try gc.allocate(mem_reqs, .{ .device_local_bit = true });
-    defer gc.dev.freeMemory(memory, null);
-    try gc.dev.bindBufferMemory(buffer, memory, 0);
+    defer vk.freeMemory(gc.dev, memory, null);
+    try vk.bindBufferMemory(gc.dev, buffer, memory, 0);
 
     try uploadVertices(&gc, pool, buffer);
 
@@ -183,24 +183,24 @@ pub fn main() !void {
     }
 
     try swapchain.waitForAllFences();
-    try gc.dev.deviceWaitIdle();
+    try vk.deviceWaitIdle(gc.dev);
 }
 
 fn uploadVertices(gc: *const GraphicsContext, pool: vk.CommandPool, buffer: vk.Buffer) !void {
-    const staging_buffer = try gc.dev.createBuffer(&.{
+    const staging_buffer = try vk.createBuffer(gc.dev, &.{
         .size = @sizeOf(@TypeOf(vertices)),
         .usage = .{ .transfer_src_bit = true },
         .sharing_mode = .exclusive,
     }, null);
-    defer gc.dev.destroyBuffer(staging_buffer, null);
-    const mem_reqs = gc.dev.getBufferMemoryRequirements(staging_buffer);
+    defer vk.destroyBuffer(gc.dev, staging_buffer, null);
+    const mem_reqs = vk.getBufferMemoryRequirements(gc.dev, staging_buffer);
     const staging_memory = try gc.allocate(mem_reqs, .{ .host_visible_bit = true, .host_coherent_bit = true });
-    defer gc.dev.freeMemory(staging_memory, null);
-    try gc.dev.bindBufferMemory(staging_buffer, staging_memory, 0);
+    defer vk.freeMemory(gc.dev, staging_memory, null);
+    try vk.bindBufferMemory(gc.dev, staging_buffer, staging_memory, 0);
 
     {
-        const data = try gc.dev.mapMemory(staging_memory, 0, vk.WHOLE_SIZE, .{});
-        defer gc.dev.unmapMemory(staging_memory);
+        const data = try vk.mapMemory(gc.dev, staging_memory, 0, vk.WHOLE_SIZE, .{});
+        defer vk.unmapMemory(gc.dev, staging_memory);
 
         const gpu_vertices: [*]Vertex = @ptrCast(@alignCast(data));
         @memcpy(gpu_vertices, vertices[0..]);
@@ -211,16 +211,14 @@ fn uploadVertices(gc: *const GraphicsContext, pool: vk.CommandPool, buffer: vk.B
 
 fn copyBuffer(gc: *const GraphicsContext, pool: vk.CommandPool, dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
     var cmdbuf_handle: vk.CommandBuffer = undefined;
-    try gc.dev.allocateCommandBuffers(&.{
+    try vk.allocateCommandBuffers(gc.dev, &.{
         .command_pool = pool,
         .level = .primary,
         .command_buffer_count = 1,
     }, @ptrCast(&cmdbuf_handle));
-    defer gc.dev.freeCommandBuffers(pool, 1, @ptrCast(&cmdbuf_handle));
+    defer vk.freeCommandBuffers(gc.dev, pool, 1, @ptrCast(&cmdbuf_handle));
 
-    const cmdbuf = GraphicsContext.CommandBuffer.init(cmdbuf_handle, gc.dev.wrapper);
-
-    try cmdbuf.beginCommandBuffer(&.{
+    try vk.beginCommandBuffer(cmdbuf_handle, &.{
         .flags = .{ .one_time_submit_bit = true },
     });
 
@@ -229,17 +227,17 @@ fn copyBuffer(gc: *const GraphicsContext, pool: vk.CommandPool, dst: vk.Buffer, 
         .dst_offset = 0,
         .size = size,
     };
-    cmdbuf.copyBuffer(src, dst, 1, @ptrCast(&region));
+    vk.cmdCopyBuffer(cmdbuf_handle, src, dst, 1, @ptrCast(&region));
 
-    try cmdbuf.endCommandBuffer();
+    try vk.endCommandBuffer(cmdbuf_handle);
 
     const si = vk.SubmitInfo{
         .command_buffer_count = 1,
-        .p_command_buffers = (&cmdbuf.handle)[0..1],
+        .p_command_buffers = (&cmdbuf_handle)[0..1],
         .p_wait_dst_stage_mask = undefined,
     };
-    try gc.dev.queueSubmit(gc.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
-    try gc.dev.queueWaitIdle(gc.graphics_queue.handle);
+    try vk.queueSubmit(gc.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
+    try vk.queueWaitIdle(gc.graphics_queue.handle);
 }
 
 fn createCommandBuffers(
@@ -255,12 +253,12 @@ fn createCommandBuffers(
     const cmdbufs = try allocator.alloc(vk.CommandBuffer, framebuffers.len);
     errdefer allocator.free(cmdbufs);
 
-    try gc.dev.allocateCommandBuffers(&.{
+    try vk.allocateCommandBuffers(gc.dev, &.{
         .command_pool = pool,
         .level = .primary,
         .command_buffer_count = @intCast(cmdbufs.len),
     }, cmdbufs.ptr);
-    errdefer gc.dev.freeCommandBuffers(pool, @intCast(cmdbufs.len), cmdbufs.ptr);
+    errdefer vk.freeCommandBuffers(gc.dev, pool, @intCast(cmdbufs.len), cmdbufs.ptr);
 
     const clear = vk.ClearValue{
         .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
@@ -281,10 +279,10 @@ fn createCommandBuffers(
     };
 
     for (cmdbufs, framebuffers) |cmdbuf, framebuffer| {
-        try gc.dev.beginCommandBuffer(cmdbuf, &.{});
+        try vk.beginCommandBuffer(cmdbuf, &.{});
 
-        gc.dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
-        gc.dev.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(&scissor));
+        vk.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
+        vk.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(&scissor));
 
         // This needs to be a separate definition - see https://github.com/ziglang/zig/issues/7627.
         const render_area = vk.Rect2D{
@@ -292,7 +290,7 @@ fn createCommandBuffers(
             .extent = extent,
         };
 
-        gc.dev.cmdBeginRenderPass(cmdbuf, &.{
+        vk.cmdBeginRenderPass(cmdbuf, &.{
             .render_pass = render_pass,
             .framebuffer = framebuffer,
             .render_area = render_area,
@@ -300,20 +298,20 @@ fn createCommandBuffers(
             .p_clear_values = @ptrCast(&clear),
         }, .@"inline");
 
-        gc.dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
+        vk.cmdBindPipeline(cmdbuf, .graphics, pipeline);
         const offset = [_]vk.DeviceSize{0};
-        gc.dev.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&buffer), &offset);
-        gc.dev.cmdDraw(cmdbuf, vertices.len, 1, 0, 0);
+        vk.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&buffer), &offset);
+        vk.cmdDraw(cmdbuf, vertices.len, 1, 0, 0);
 
-        gc.dev.cmdEndRenderPass(cmdbuf);
-        try gc.dev.endCommandBuffer(cmdbuf);
+        vk.cmdEndRenderPass(cmdbuf);
+        try vk.endCommandBuffer(cmdbuf);
     }
 
     return cmdbufs;
 }
 
 fn destroyCommandBuffers(gc: *const GraphicsContext, pool: vk.CommandPool, allocator: Allocator, cmdbufs: []vk.CommandBuffer) void {
-    gc.dev.freeCommandBuffers(pool, @truncate(cmdbufs.len), cmdbufs.ptr);
+    vk.freeCommandBuffers(gc.dev, pool, @truncate(cmdbufs.len), cmdbufs.ptr);
     allocator.free(cmdbufs);
 }
 
@@ -322,10 +320,10 @@ fn createFramebuffers(gc: *const GraphicsContext, allocator: Allocator, render_p
     errdefer allocator.free(framebuffers);
 
     var i: usize = 0;
-    errdefer for (framebuffers[0..i]) |fb| gc.dev.destroyFramebuffer(fb, null);
+    errdefer for (framebuffers[0..i]) |fb| vk.destroyFramebuffer(gc.dev, fb, null);
 
     for (framebuffers) |*fb| {
-        fb.* = try gc.dev.createFramebuffer(&.{
+        fb.* = try vk.createFramebuffer(gc.dev, &.{
             .render_pass = render_pass,
             .attachment_count = 1,
             .p_attachments = @ptrCast(&swapchain.swap_images[i].view),
@@ -340,7 +338,7 @@ fn createFramebuffers(gc: *const GraphicsContext, allocator: Allocator, render_p
 }
 
 fn destroyFramebuffers(gc: *const GraphicsContext, allocator: Allocator, framebuffers: []const vk.Framebuffer) void {
-    for (framebuffers) |fb| gc.dev.destroyFramebuffer(fb, null);
+    for (framebuffers) |fb| vk.destroyFramebuffer(gc.dev, fb, null);
     allocator.free(framebuffers);
 }
 
@@ -367,7 +365,7 @@ fn createRenderPass(gc: *const GraphicsContext, swapchain: Swapchain) !vk.Render
         .p_color_attachments = @ptrCast(&color_attachment_ref),
     };
 
-    return try gc.dev.createRenderPass(&.{
+    return try vk.createRenderPass(gc.dev, &.{
         .attachment_count = 1,
         .p_attachments = @ptrCast(&color_attachment),
         .subpass_count = 1,
@@ -380,17 +378,17 @@ fn createPipeline(
     layout: vk.PipelineLayout,
     render_pass: vk.RenderPass,
 ) !vk.Pipeline {
-    const vert = try gc.dev.createShaderModule(&.{
+    const vert = try vk.createShaderModule(gc.dev, &.{
         .code_size = vert_spv.len,
         .p_code = @ptrCast(&vert_spv),
     }, null);
-    defer gc.dev.destroyShaderModule(vert, null);
+    defer vk.destroyShaderModule(gc.dev, vert, null);
 
-    const frag = try gc.dev.createShaderModule(&.{
+    const frag = try vk.createShaderModule(gc.dev, &.{
         .code_size = frag_spv.len,
         .p_code = @ptrCast(&frag_spv),
     }, null);
-    defer gc.dev.destroyShaderModule(frag, null);
+    defer vk.destroyShaderModule(gc.dev, frag, null);
 
     const pssci = [_]vk.PipelineShaderStageCreateInfo{
         .{
@@ -492,7 +490,8 @@ fn createPipeline(
     };
 
     var pipeline: vk.Pipeline = undefined;
-    _ = try gc.dev.createGraphicsPipelines(
+    _ = try vk.createGraphicsPipelines(
+        gc.dev,
         .null_handle,
         1,
         @ptrCast(&gpci),

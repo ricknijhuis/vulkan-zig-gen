@@ -26,7 +26,7 @@ pub const Swapchain = struct {
     }
 
     pub fn initRecycle(gc: *const GraphicsContext, allocator: Allocator, extent: vk.Extent2D, old_handle: vk.SwapchainKHR) !Swapchain {
-        const caps = try gc.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(gc.pdev, gc.surface);
+        const caps = try vk.getPhysicalDeviceSurfaceCapabilitiesKHR(gc.pdev, gc.surface);
         const actual_extent = findActualExtent(caps, extent);
         if (actual_extent.width == 0 or actual_extent.height == 0) {
             return error.InvalidSurfaceDimensions;
@@ -46,7 +46,7 @@ pub const Swapchain = struct {
         else
             .exclusive;
 
-        const handle = gc.dev.createSwapchainKHR(&.{
+        const handle = vk.createSwapchainKHR(gc.dev, &.{
             .surface = gc.surface,
             .min_image_count = image_count,
             .image_format = surface_format.format,
@@ -65,11 +65,11 @@ pub const Swapchain = struct {
         }, null) catch {
             return error.SwapchainCreationFailed;
         };
-        errdefer gc.dev.destroySwapchainKHR(handle, null);
+        errdefer vk.destroySwapchainKHR(gc.dev, handle, null);
 
         if (old_handle != .null_handle) {
             // Apparently, the old swapchain handle still needs to be destroyed after recreating.
-            gc.dev.destroySwapchainKHR(old_handle, null);
+            vk.destroySwapchainKHR(gc.dev, old_handle, null);
         }
 
         const swap_images = try initSwapchainImages(gc, handle, surface_format.format, allocator);
@@ -78,10 +78,10 @@ pub const Swapchain = struct {
             allocator.free(swap_images);
         }
 
-        var next_image_acquired = try gc.dev.createSemaphore(&.{}, null);
-        errdefer gc.dev.destroySemaphore(next_image_acquired, null);
+        var next_image_acquired = try vk.createSemaphore(gc.dev, &.{}, null);
+        errdefer vk.destroySemaphore(gc.dev, next_image_acquired, null);
 
-        const result = try gc.dev.acquireNextImageKHR(handle, std.math.maxInt(u64), next_image_acquired, .null_handle);
+        const result = try vk.acquireNextImageKHR(gc.dev, handle, std.math.maxInt(u64), next_image_acquired, .null_handle);
         // event with a .suboptimal_khr we can still go on to present
         // if we error even for .suboptimal_khr the example will crash and segfault
         // on resize, since even the recreated swapchain can be suboptimal during a
@@ -107,7 +107,7 @@ pub const Swapchain = struct {
     fn deinitExceptSwapchain(self: Swapchain) void {
         for (self.swap_images) |si| si.deinit(self.gc);
         self.allocator.free(self.swap_images);
-        self.gc.dev.destroySemaphore(self.next_image_acquired, null);
+        vk.destroySemaphore(self.gc.dev, self.next_image_acquired, null);
     }
 
     pub fn waitForAllFences(self: Swapchain) !void {
@@ -118,7 +118,7 @@ pub const Swapchain = struct {
         // if we have no swapchain none of these should exist and we can just return
         if (self.handle == .null_handle) return;
         self.deinitExceptSwapchain();
-        self.gc.dev.destroySwapchainKHR(self.handle, null);
+        vk.destroySwapchainKHR(self.gc.dev, self.handle, null);
     }
 
     pub fn recreate(self: *Swapchain, new_extent: vk.Extent2D) !void {
@@ -133,7 +133,7 @@ pub const Swapchain = struct {
             error.SwapchainCreationFailed => {
                 // we failed while recreating so our current handle still exists,
                 // but we won't destroy it in the deferred deinit of this object.
-                gc.dev.destroySwapchainKHR(old_handle, null);
+                vk.destroySwapchainKHR(self.gc.dev, old_handle, null);
                 return err;
             },
             else => return err,
@@ -169,11 +169,11 @@ pub const Swapchain = struct {
         // Step 1: Make sure the current frame has finished rendering
         const current = self.currentSwapImage();
         try current.waitForFence(self.gc);
-        try self.gc.dev.resetFences(1, @ptrCast(&current.frame_fence));
+        try vk.resetFences(self.gc.dev, 1, @ptrCast(&current.frame_fence));
 
         // Step 2: Submit the command buffer
         const wait_stage = [_]vk.PipelineStageFlags{.{ .top_of_pipe_bit = true }};
-        try self.gc.dev.queueSubmit(self.gc.graphics_queue.handle, 1, &[_]vk.SubmitInfo{.{
+        try vk.queueSubmit(self.gc.graphics_queue.handle, 1, &[_]vk.SubmitInfo{.{
             .wait_semaphore_count = 1,
             .p_wait_semaphores = @ptrCast(&current.image_acquired),
             .p_wait_dst_stage_mask = &wait_stage,
@@ -184,7 +184,7 @@ pub const Swapchain = struct {
         }}, current.frame_fence);
 
         // Step 3: Present the current frame
-        _ = try self.gc.dev.queuePresentKHR(self.gc.present_queue.handle, &.{
+        _ = try vk.queuePresentKHR(self.gc.present_queue.handle, &.{
             .wait_semaphore_count = 1,
             .p_wait_semaphores = @ptrCast(&current.render_finished),
             .swapchain_count = 1,
@@ -193,7 +193,8 @@ pub const Swapchain = struct {
         });
 
         // Step 4: Acquire next frame
-        const result = try self.gc.dev.acquireNextImageKHR(
+        const result = try vk.acquireNextImageKHR(
+            self.gc.dev,
             self.handle,
             std.math.maxInt(u64),
             self.next_image_acquired,
@@ -219,7 +220,7 @@ const SwapImage = struct {
     frame_fence: vk.Fence,
 
     fn init(gc: *const GraphicsContext, image: vk.Image, format: vk.Format) !SwapImage {
-        const view = try gc.dev.createImageView(&.{
+        const view = try vk.createImageView(gc.dev, &.{
             .image = image,
             .view_type = .@"2d",
             .format = format,
@@ -232,16 +233,16 @@ const SwapImage = struct {
                 .layer_count = 1,
             },
         }, null);
-        errdefer gc.dev.destroyImageView(view, null);
+        errdefer vk.destroyImageView(gc.dev, view, null);
 
-        const image_acquired = try gc.dev.createSemaphore(&.{}, null);
-        errdefer gc.dev.destroySemaphore(image_acquired, null);
+        const image_acquired = try vk.createSemaphore(gc.dev, &.{}, null);
+        errdefer vk.destroySemaphore(gc.dev, image_acquired, null);
 
-        const render_finished = try gc.dev.createSemaphore(&.{}, null);
-        errdefer gc.dev.destroySemaphore(render_finished, null);
+        const render_finished = try vk.createSemaphore(gc.dev, &.{}, null);
+        errdefer vk.destroySemaphore(gc.dev, render_finished, null);
 
-        const frame_fence = try gc.dev.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
-        errdefer gc.dev.destroyFence(frame_fence, null);
+        const frame_fence = try vk.createFence(gc.dev, &.{ .flags = .{ .signaled_bit = true } }, null);
+        errdefer vk.destroyFence(gc.dev, frame_fence, null);
 
         return SwapImage{
             .image = image,
@@ -254,19 +255,19 @@ const SwapImage = struct {
 
     fn deinit(self: SwapImage, gc: *const GraphicsContext) void {
         self.waitForFence(gc) catch return;
-        gc.dev.destroyImageView(self.view, null);
-        gc.dev.destroySemaphore(self.image_acquired, null);
-        gc.dev.destroySemaphore(self.render_finished, null);
-        gc.dev.destroyFence(self.frame_fence, null);
+        vk.destroyImageView(gc.dev, self.view, null);
+        vk.destroySemaphore(gc.dev, self.image_acquired, null);
+        vk.destroySemaphore(gc.dev, self.render_finished, null);
+        vk.destroyFence(gc.dev, self.frame_fence, null);
     }
 
     fn waitForFence(self: SwapImage, gc: *const GraphicsContext) !void {
-        _ = try gc.dev.waitForFences(1, @ptrCast(&self.frame_fence), .true, std.math.maxInt(u64));
+        _ = try vk.waitForFences(gc.dev, 1, @ptrCast(&self.frame_fence), .true, std.math.maxInt(u64));
     }
 };
 
 fn initSwapchainImages(gc: *const GraphicsContext, swapchain: vk.SwapchainKHR, format: vk.Format, allocator: Allocator) ![]SwapImage {
-    const images = try gc.dev.getSwapchainImagesAllocKHR(swapchain, allocator);
+    const images = try vk.getSwapchainImagesAllocKHR(gc.dev, swapchain, allocator);
     defer allocator.free(images);
 
     const swap_images = try allocator.alloc(SwapImage, images.len);
@@ -289,7 +290,7 @@ fn findSurfaceFormat(gc: *const GraphicsContext, allocator: Allocator) !vk.Surfa
         .color_space = .srgb_nonlinear_khr,
     };
 
-    const surface_formats = try gc.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(gc.pdev, gc.surface, allocator);
+    const surface_formats = try vk.getPhysicalDeviceSurfaceFormatsAllocKHR(gc.pdev, gc.surface, allocator);
     defer allocator.free(surface_formats);
 
     for (surface_formats) |sfmt| {
@@ -302,7 +303,7 @@ fn findSurfaceFormat(gc: *const GraphicsContext, allocator: Allocator) !vk.Surfa
 }
 
 fn findPresentMode(gc: *const GraphicsContext, allocator: Allocator) !vk.PresentModeKHR {
-    const present_modes = try gc.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(gc.pdev, gc.surface, allocator);
+    const present_modes = try vk.getPhysicalDeviceSurfacePresentModesAllocKHR(gc.pdev, gc.surface, allocator);
     defer allocator.free(present_modes);
 
     const preferred = [_]vk.PresentModeKHR{

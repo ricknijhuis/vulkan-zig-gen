@@ -20,35 +20,25 @@ const required_device_extensions = [_][*:0]const u8{vk.extensions.khr_swapchain.
 ///   and object pointer in the same struct leads to missed optimizations. If the wrapper
 ///   member is a pointer, LLVM will try to optimize it as any other vtable.
 /// The wrappers contain
-const BaseWrapper = vk.BaseWrapper;
-const InstanceWrapper = vk.InstanceWrapper;
-const DeviceWrapper = vk.DeviceWrapper;
-
-const Instance = vk.InstanceProxy;
-const Device = vk.DeviceProxy;
-
 pub const GraphicsContext = struct {
-    pub const CommandBuffer = vk.CommandBufferProxy;
-
     allocator: Allocator,
 
-    vkb: BaseWrapper,
-
-    instance: Instance,
+    instance: vk.Instance,
     debug_messenger: vk.DebugUtilsMessengerEXT,
     surface: vk.SurfaceKHR,
     pdev: vk.PhysicalDevice,
     props: vk.PhysicalDeviceProperties,
     mem_props: vk.PhysicalDeviceMemoryProperties,
 
-    dev: Device,
+    dev: vk.Device,
     graphics_queue: Queue,
     present_queue: Queue,
 
     pub fn init(allocator: Allocator, app_name: [*:0]const u8, window: *c.GLFWwindow) !GraphicsContext {
         var self: GraphicsContext = undefined;
         self.allocator = allocator;
-        self.vkb = BaseWrapper.load(c.glfwGetInstanceProcAddress);
+
+        vk.init(c.glfwGetInstanceProcAddress);
 
         var extension_names: std.ArrayList([*:0]const u8) = .empty;
         defer extension_names.deinit(allocator);
@@ -62,7 +52,7 @@ pub const GraphicsContext = struct {
         const glfw_exts = c.glfwGetRequiredInstanceExtensions(&glfw_exts_count);
         try extension_names.appendSlice(allocator, @ptrCast(glfw_exts[0..glfw_exts_count]));
 
-        const instance = try self.vkb.createInstance(&.{
+        self.instance = try vk.createInstance(&.{
             .p_application_info = &.{
                 .p_application_name = app_name,
                 .application_version = @bitCast(vk.makeApiVersion(0, 0, 0, 0)),
@@ -77,13 +67,9 @@ pub const GraphicsContext = struct {
             .flags = .{ .enumerate_portability_bit_khr = true },
         }, null);
 
-        const vki = try allocator.create(InstanceWrapper);
-        errdefer allocator.destroy(vki);
-        vki.* = InstanceWrapper.load(instance, self.vkb.dispatch.vkGetInstanceProcAddr.?);
-        self.instance = Instance.init(instance, vki);
-        errdefer self.instance.destroyInstance(null);
+        errdefer vk.destroyInstance(self.instance, null);
 
-        self.debug_messenger = try self.instance.createDebugUtilsMessengerEXT(&.{
+        self.debug_messenger = try vk.createDebugUtilsMessengerEXT(self.instance, &.{
             .message_severity = .{
                 //.verbose_bit_ext = true,
                 //.info_bit_ext = true,
@@ -100,37 +86,29 @@ pub const GraphicsContext = struct {
         }, null);
 
         self.surface = try createSurface(self.instance, window);
-        errdefer self.instance.destroySurfaceKHR(self.surface, null);
+        errdefer vk.destroySurfaceKHR(self.instance, self.surface, null);
 
         const candidate = try pickPhysicalDevice(self.instance, allocator, self.surface);
         self.pdev = candidate.pdev;
         self.props = candidate.props;
 
-        const dev = try initializeCandidate(self.instance, candidate);
+        self.dev = try initializeCandidate(candidate);
 
-        const vkd = try allocator.create(DeviceWrapper);
-        errdefer allocator.destroy(vkd);
-        vkd.* = DeviceWrapper.load(dev, self.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
-        self.dev = Device.init(dev, vkd);
-        errdefer self.dev.destroyDevice(null);
+        errdefer vk.destroyDevice(self.dev, null);
 
         self.graphics_queue = Queue.init(self.dev, candidate.queues.graphics_family);
         self.present_queue = Queue.init(self.dev, candidate.queues.present_family);
 
-        self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.pdev);
+        self.mem_props = vk.getPhysicalDeviceMemoryProperties(self.pdev);
 
         return self;
     }
 
     pub fn deinit(self: GraphicsContext) void {
-        self.dev.destroyDevice(null);
-        self.instance.destroySurfaceKHR(self.surface, null);
-        self.instance.destroyDebugUtilsMessengerEXT(self.debug_messenger, null);
-        self.instance.destroyInstance(null);
-
-        // Don't forget to free the tables to prevent a memory leak.
-        self.allocator.destroy(self.dev.wrapper);
-        self.allocator.destroy(self.instance.wrapper);
+        vk.destroyDevice(self.dev, null);
+        vk.destroySurfaceKHR(self.instance, self.surface, null);
+        vk.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+        vk.destroyInstance(self.instance, null);
     }
 
     pub fn deviceName(self: *const GraphicsContext) []const u8 {
@@ -148,7 +126,7 @@ pub const GraphicsContext = struct {
     }
 
     pub fn allocate(self: GraphicsContext, requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags) !vk.DeviceMemory {
-        return try self.dev.allocateMemory(&.{
+        return try vk.allocateMemory(self.dev, &.{
             .allocation_size = requirements.size,
             .memory_type_index = try self.findMemoryTypeIndex(requirements.memory_type_bits, flags),
         }, null);
@@ -159,24 +137,24 @@ pub const Queue = struct {
     handle: vk.Queue,
     family: u32,
 
-    fn init(device: Device, family: u32) Queue {
+    fn init(device: vk.Device, family: u32) Queue {
         return .{
-            .handle = device.getDeviceQueue(family, 0),
+            .handle = vk.getDeviceQueue(device, family, 0),
             .family = family,
         };
     }
 };
 
-fn createSurface(instance: Instance, window: *c.GLFWwindow) !vk.SurfaceKHR {
+fn createSurface(instance: vk.Instance, window: *c.GLFWwindow) !vk.SurfaceKHR {
     var surface: vk.SurfaceKHR = undefined;
-    if (c.glfwCreateWindowSurface(instance.handle, window, null, &surface) != .success) {
+    if (c.glfwCreateWindowSurface(instance, window, null, &surface) != .success) {
         return error.SurfaceInitFailed;
     }
 
     return surface;
 }
 
-fn initializeCandidate(instance: Instance, candidate: DeviceCandidate) !vk.Device {
+fn initializeCandidate(candidate: DeviceCandidate) !vk.Device {
     const priority = [_]f32{1};
     const qci = [_]vk.DeviceQueueCreateInfo{
         .{
@@ -196,7 +174,7 @@ fn initializeCandidate(instance: Instance, candidate: DeviceCandidate) !vk.Devic
     else
         2;
 
-    return try instance.createDevice(candidate.pdev, &.{
+    return try vk.createDevice(candidate.pdev, &.{
         .queue_create_info_count = queue_count,
         .p_queue_create_infos = &qci,
         .enabled_extension_count = required_device_extensions.len,
@@ -227,15 +205,15 @@ fn debugUtilsMessengerCallback(severity: vk.DebugUtilsMessageSeverityFlagsEXT, m
 }
 
 fn pickPhysicalDevice(
-    instance: Instance,
+    instance: vk.Instance,
     allocator: Allocator,
     surface: vk.SurfaceKHR,
 ) !DeviceCandidate {
-    const pdevs = try instance.enumeratePhysicalDevicesAlloc(allocator);
+    const pdevs = try vk.enumeratePhysicalDevicesAlloc(instance, allocator);
     defer allocator.free(pdevs);
 
     for (pdevs) |pdev| {
-        if (try checkSuitable(instance, pdev, allocator, surface)) |candidate| {
+        if (try checkSuitable(pdev, allocator, surface)) |candidate| {
             return candidate;
         }
     }
@@ -244,21 +222,20 @@ fn pickPhysicalDevice(
 }
 
 fn checkSuitable(
-    instance: Instance,
     pdev: vk.PhysicalDevice,
     allocator: Allocator,
     surface: vk.SurfaceKHR,
 ) !?DeviceCandidate {
-    if (!try checkExtensionSupport(instance, pdev, allocator)) {
+    if (!try checkExtensionSupport(pdev, allocator)) {
         return null;
     }
 
-    if (!try checkSurfaceSupport(instance, pdev, surface)) {
+    if (!try checkSurfaceSupport(pdev, surface)) {
         return null;
     }
 
-    if (try allocateQueues(instance, pdev, allocator, surface)) |allocation| {
-        const props = instance.getPhysicalDeviceProperties(pdev);
+    if (try allocateQueues(pdev, allocator, surface)) |allocation| {
+        const props = vk.getPhysicalDeviceProperties(pdev);
         return DeviceCandidate{
             .pdev = pdev,
             .props = props,
@@ -269,8 +246,8 @@ fn checkSuitable(
     return null;
 }
 
-fn allocateQueues(instance: Instance, pdev: vk.PhysicalDevice, allocator: Allocator, surface: vk.SurfaceKHR) !?QueueAllocation {
-    const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, allocator);
+fn allocateQueues(pdev: vk.PhysicalDevice, allocator: Allocator, surface: vk.SurfaceKHR) !?QueueAllocation {
+    const families = try vk.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, allocator);
     defer allocator.free(families);
 
     var graphics_family: ?u32 = null;
@@ -283,7 +260,7 @@ fn allocateQueues(instance: Instance, pdev: vk.PhysicalDevice, allocator: Alloca
             graphics_family = family;
         }
 
-        if (present_family == null and (try instance.getPhysicalDeviceSurfaceSupportKHR(pdev, family, surface)) == .true) {
+        if (present_family == null and (try vk.getPhysicalDeviceSurfaceSupportKHR(pdev, family, surface)) == .true) {
             present_family = family;
         }
     }
@@ -298,22 +275,21 @@ fn allocateQueues(instance: Instance, pdev: vk.PhysicalDevice, allocator: Alloca
     return null;
 }
 
-fn checkSurfaceSupport(instance: Instance, pdev: vk.PhysicalDevice, surface: vk.SurfaceKHR) !bool {
+fn checkSurfaceSupport(pdev: vk.PhysicalDevice, surface: vk.SurfaceKHR) !bool {
     var format_count: u32 = undefined;
-    _ = try instance.getPhysicalDeviceSurfaceFormatsKHR(pdev, surface, &format_count, null);
+    _ = try vk.getPhysicalDeviceSurfaceFormatsKHR(pdev, surface, &format_count, null);
 
     var present_mode_count: u32 = undefined;
-    _ = try instance.getPhysicalDeviceSurfacePresentModesKHR(pdev, surface, &present_mode_count, null);
+    _ = try vk.getPhysicalDeviceSurfacePresentModesKHR(pdev, surface, &present_mode_count, null);
 
     return format_count > 0 and present_mode_count > 0;
 }
 
 fn checkExtensionSupport(
-    instance: Instance,
     pdev: vk.PhysicalDevice,
     allocator: Allocator,
 ) !bool {
-    const propsv = try instance.enumerateDeviceExtensionPropertiesAlloc(pdev, null, allocator);
+    const propsv = try vk.enumerateDeviceExtensionPropertiesAlloc(pdev, null, allocator);
     defer allocator.free(propsv);
 
     for (required_device_extensions) |ext| {

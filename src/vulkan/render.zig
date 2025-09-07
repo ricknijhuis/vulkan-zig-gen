@@ -238,6 +238,22 @@ const CommandDispatchType = enum {
             .device => "device",
         };
     }
+
+    fn dispatchName(self: CommandDispatchType) []const u8 {
+        return switch (self) {
+            .base => "base_dispatch",
+            .instance => "instance_dispatch",
+            .device => "device_dispatch",
+        };
+    }
+
+    fn wrapperName(self: CommandDispatchType) []const u8 {
+        return switch (self) {
+            .base => "base_wrapper",
+            .instance => "instance_wrapper",
+            .device => "device_wrapper",
+        };
+    }
 };
 
 const dispatchable_handles = std.StaticStringMap(CommandDispatchType).initComptime(.{
@@ -650,7 +666,7 @@ const Renderer = struct {
         try self.renderExtensionInfo();
         try self.renderDispatchTables();
         try self.renderWrappers();
-        try self.renderProxies();
+        try self.renderInitFunction();
     }
 
     fn renderApiConstant(self: *Self, api_constant: reg.ApiConstant) !void {
@@ -1426,7 +1442,7 @@ const Renderer = struct {
 
     fn renderDispatchTable(self: *Self, dispatch_type: CommandDispatchType) !void {
         try self.writer.print(
-            "pub const {s}Dispatch = struct {{\n",
+            "const {s}Dispatch = struct {{\n",
             .{dispatch_type.name()},
         );
 
@@ -1459,19 +1475,24 @@ const Renderer = struct {
 
     fn renderWrappersOfDispatchType(self: *Self, dispatch_type: CommandDispatchType) !void {
         const name = dispatch_type.name();
+        const instance_name = dispatch_type.dispatchName();
+        const wrapper_name = dispatch_type.wrapperName();
+
+        try self.writer.print("var {0s}: {1s}Dispatch = undefined;\n", .{ instance_name, name });
+        try self.writer.print("var {0s}: {1s}Wrapper = .{{}};\n", .{ wrapper_name, name });
 
         try self.writer.print(
-            \\pub const {0s}Wrapper = {0s}WrapperWithCustomDispatch({0s}Dispatch);
-            \\pub fn {0s}WrapperWithCustomDispatch(DispatchType: type) type {{
+            \\const {0s}Wrapper = {0s}WrapperWithCustomDispatch({0s}Dispatch);
+            \\fn {0s}WrapperWithCustomDispatch(DispatchType: type) type {{
             \\    return struct {{
             \\        const Self = @This();
             \\        pub const Dispatch = DispatchType;
             \\
-            \\        dispatch: Dispatch,
-            \\
-        , .{name});
+            \\        dispatch: *{0s}Dispatch = &{1s},
+        , .{ name, instance_name });
 
         try self.renderWrapperLoader(dispatch_type);
+        try self.writer.writeAll("};}\n");
 
         for (self.registry.decls) |decl| {
             // If the target type does not exist, it was likely an empty enum -
@@ -1489,13 +1510,11 @@ const Renderer = struct {
             // alias like `const old = new;`. This ensures that Vulkan bindings generated
             // for newer versions of vulkan can still invoke extension behavior on older
             // implementations.
-            try self.renderWrapper(decl.name, command);
+            try self.renderWrapper(dispatch_type, decl.name, command);
             if (enumerate_functions.has(decl.name)) {
                 try self.renderWrapperAlloc(decl.name, command);
             }
         }
-
-        try self.writer.writeAll("};}\n");
     }
 
     fn renderWrapperLoader(self: *Self, dispatch_type: CommandDispatchType) !void {
@@ -1514,15 +1533,21 @@ const Renderer = struct {
         @setEvalBranchQuota(2000);
 
         try self.writer.print(
-            \\pub fn load({[params]s}) Self {{
-            \\    var self: Self = .{{ .dispatch = .{{}} }};
+            \\pub fn load(self: *Self, {[params]s}) void {{
             \\    inline for (std.meta.fields(Dispatch)) |field| {{
             \\        const cmd_ptr = loader({[first_arg]s}, field.name.ptr) orelse undefined;
             \\        @field(self.dispatch, field.name) = @ptrCast(cmd_ptr);
             \\    }}
-            \\    return self;
             \\}}
         , .{ .params = params, .first_arg = loader_first_arg });
+    }
+
+    fn renderInitFunction(self: *Self) !void {
+        try self.writer.writeAll(
+            \\pub fn init(loader: anytype) void {
+            \\    base_wrapper.load(loader);
+            \\}
+        );
     }
 
     fn renderProxies(self: *Self) !void {
@@ -1763,7 +1788,7 @@ const Renderer = struct {
     ) !void {
         try self.writer.writeAll("pub fn ");
         try self.renderWrapperName(name, dispatch_handle, kind);
-        try self.writer.writeAll("(self: Self, ");
+        try self.writer.writeAll("(");
 
         for (command.params) |param| {
             const class = try self.classifyParam(param);
@@ -1799,12 +1824,14 @@ const Renderer = struct {
 
     fn renderWrapperCall(
         self: *Self,
+        dispatch_type: CommandDispatchType,
         name: []const u8,
         command: reg.Command,
         returns: []const ReturnValue,
         return_var_name: ?[]const u8,
     ) !void {
-        try self.writer.writeAll("self.dispatch.");
+        const instance_name = dispatch_type.dispatchName();
+        try self.writer.print("{0s}.", .{instance_name});
         try self.writeIdentifier(name);
         try self.writer.writeAll(".?(");
 
@@ -1892,7 +1919,7 @@ const Renderer = struct {
         try self.writer.writeAll("};\n");
     }
 
-    fn renderWrapper(self: *Self, name: []const u8, command: reg.Command) !void {
+    fn renderWrapper(self: *Self, dispatch_type: CommandDispatchType, name: []const u8, command: reg.Command) !void {
         const returns_vk_result = command.return_type.* == .name and mem.eql(u8, command.return_type.name, "VkResult");
         const returns_void = command.return_type.* == .name and mem.eql(u8, command.return_type.name, "void");
 
@@ -1917,14 +1944,15 @@ const Renderer = struct {
 
             if (returns_vk_result) {
                 try self.writer.writeAll("const result = ");
-                try self.renderWrapperCall(name, command, returns, null);
+                try self.renderWrapperCall(dispatch_type, name, command, returns, null);
                 try self.writer.writeAll(";\n");
 
                 try self.renderErrorSwitch("result", command);
+
                 try self.writer.writeAll("return result;\n");
             } else {
                 try self.writer.writeAll("return ");
-                try self.renderWrapperCall(name, command, returns, null);
+                try self.renderWrapperCall(dispatch_type, name, command, returns, null);
                 try self.writer.writeAll(";\n");
             }
 
@@ -1952,7 +1980,7 @@ const Renderer = struct {
 
         if (returns_vk_result) {
             try self.writer.writeAll("const result = ");
-            try self.renderWrapperCall(name, command, returns, return_var_name);
+            try self.renderWrapperCall(dispatch_type, name, command, returns, return_var_name);
             try self.writer.writeAll(";\n");
 
             try self.renderErrorSwitch("result", command);
@@ -1963,11 +1991,22 @@ const Renderer = struct {
             if (!returns_void) {
                 try self.writer.writeAll("return_values.return_value = ");
             }
-            try self.renderWrapperCall(name, command, returns, return_var_name);
+            try self.renderWrapperCall(dispatch_type, name, command, returns, return_var_name);
             try self.writer.writeAll(";\n");
         }
 
         if (returns.len >= 1) {
+            // Automatically load function pointers when calling createInstance or createDevice
+            if (dispatch_type == .base and std.mem.eql(u8, name, "vkCreateInstance")) {
+                try self.writer.writeAll("instance_wrapper.load(");
+                try self.writeIdentifierWithCase(.snake, return_var_name);
+                try self.writer.writeAll(", getInstanceProcAddr);\n");
+            } else if (dispatch_type == .instance and std.mem.eql(u8, name, "vkCreateDevice")) {
+                try self.writer.writeAll("device_wrapper.load(");
+                try self.writeIdentifierWithCase(.snake, return_var_name);
+                try self.writer.writeAll(", getDeviceProcAddr);\n");
+            }
+
             try self.writer.writeAll("return ");
             try self.writeIdentifierWithCase(.snake, return_var_name);
             try self.writer.writeAll(";\n");
@@ -1987,7 +2026,7 @@ const Renderer = struct {
     ) !void {
         try self.writer.writeAll("pub fn ");
         try self.renderWrapperName(name, "", .wrapper);
-        try self.writer.writeAll("(self: Self, ");
+        try self.writer.writeAll("(");
         for (params) |param| {
             const class = try self.classifyParam(param);
             // Skip the dispatch type for proxying wrappers
@@ -2042,11 +2081,10 @@ const Renderer = struct {
                 \\errdefer allocator.free(data);
                 \\var result = Result.incomplete;
                 \\while (result == .incomplete) {
-                \\    _ = try
+                \\    _ = try 
             );
         }
 
-        try self.writer.writeAll(" self.");
         try self.renderWrapperName(wrapped_name, "", .wrapper);
         try self.writer.writeAll("(\n");
         for (params) |param| {
@@ -2058,7 +2096,7 @@ const Renderer = struct {
         if (returns_vk_result) {
             try self.writer.writeAll(
                 \\data = try allocator.realloc(data, count);
-                \\result = try
+                \\result = try 
             );
         } else {
             try self.writer.writeAll("const data = try allocator.alloc(");
@@ -2069,7 +2107,6 @@ const Renderer = struct {
             );
         }
 
-        try self.writer.writeAll(" self.");
         try self.renderWrapperName(wrapped_name, "", .wrapper);
         try self.writer.writeAll("(\n");
         for (params) |param| {
