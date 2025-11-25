@@ -1535,8 +1535,9 @@ const Renderer = struct {
         try self.writer.print(
             \\pub fn load(self: *Self, {[params]s}) void {{
             \\    inline for (std.meta.fields(Dispatch)) |field| {{
-            \\        const cmd_ptr = loader({[first_arg]s}, field.name.ptr) orelse undefined;
-            \\        @field(self.dispatch, field.name) = @ptrCast(cmd_ptr);
+            \\        if (loader({[first_arg]s}, field.name.ptr)) |cmd_ptr| {{
+            \\            @field(self.dispatch, field.name) = @ptrCast(cmd_ptr);
+            \\        }}
             \\    }}
             \\}}
         , .{ .params = params, .first_arg = loader_first_arg });
@@ -2057,7 +2058,7 @@ const Renderer = struct {
             return error.InvalidRegistry;
         }
         const params = command.params[0 .. command.params.len - 2];
-        const data_type = try getEnumerateFunctionDataType(command);
+        var data_type = try getEnumerateFunctionDataType(command);
 
         if (returns_vk_result) {
             try self.writer.writeAll("pub const ");
@@ -2067,11 +2068,27 @@ const Renderer = struct {
             try self.writer.writeAll(" || Allocator.Error;\n");
         }
 
+        const count_type: reg.TypeInfo = blk: {
+            for (command.params) |param| {
+                if (std.mem.endsWith(u8, param.name, "Count")) {
+                    break :blk .{ .name = "uint32_t" };
+                }
+
+                if (std.mem.endsWith(u8, param.name, "Size")) {
+                    data_type = .{ .name = "uint8_t" };
+                    break :blk .{ .name = "size_t" };
+                }
+            }
+
+            return error.InvalidRegistry;
+        };
+
         try self.renderAllocWrapperPrototype(name, params, returns_vk_result, data_type, "", .wrapper);
-        try self.writer.writeAll(
-            \\{
-            \\    var count: u32 = undefined;
-        );
+
+        try self.writer.writeAll("{\n");
+        try self.writer.writeAll("    var count: ");
+        try self.renderTypeInfo(count_type);
+        try self.writer.writeAll(" = undefined;\n");
 
         if (returns_vk_result) {
             try self.writer.writeAll("var data: []");
